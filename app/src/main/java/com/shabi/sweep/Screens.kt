@@ -1,6 +1,7 @@
 package com.shabi.sweep
 
 import android.net.Uri
+import androidx.annotation.OptIn
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.spring
@@ -38,6 +39,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -48,6 +50,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
@@ -73,6 +76,13 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LifecycleEventEffect
+import androidx.media3.common.MediaItem
+import androidx.media3.common.util.UnstableApi
+import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.ui.PlayerView
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import kotlinx.coroutines.launch
@@ -98,7 +108,7 @@ fun AlbumsScreen(vm: SweepViewModel) {
             vm.loading -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 CircularProgressIndicator()
             }
-            vm.albums.isEmpty() -> Text("No photos found on this phone.")
+            vm.albums.isEmpty() -> Text("No photos or videos found on this phone.")
             else -> LazyVerticalGrid(
                 columns = GridCells.Fixed(2),
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
@@ -132,7 +142,7 @@ private fun AlbumTile(album: Album, remaining: Int, onClick: () -> Unit) {
             maxLines = 1, overflow = TextOverflow.Ellipsis,
         )
         Text(
-            if (remaining == 0) "All done, ${photoCount(album.photos.size)}"
+            if (remaining == 0) "All done, ${itemCount(album.photos.size)}"
             else "$remaining of ${album.photos.size} left",
             color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp,
         )
@@ -196,8 +206,8 @@ private fun MonthRow(month: MonthGroup, remaining: Int, onClick: () -> Unit) {
         Column(Modifier.weight(1f)) {
             Text(month.label, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
             Text(
-                if (remaining == 0) "All done, ${photoCount(month.photos.size)}"
-                else "$remaining of ${photoCount(month.photos.size)} left",
+                if (remaining == 0) "All done, ${itemCount(month.photos.size)}"
+                else "$remaining of ${itemCount(month.photos.size)} left",
                 color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 14.sp,
             )
         }
@@ -213,7 +223,9 @@ fun SwipeScreen(vm: SweepViewModel) {
     val photo = vm.current ?: return
     // Set by the buttons: true = keep, false = delete. The card animates away, then reports back.
     var buttonChoice by remember(photo.id) { mutableStateOf<Boolean?>(null) }
+    var playing by remember(photo.id) { mutableStateOf(false) }
 
+    Box(Modifier.fillMaxSize()) {
     Column(Modifier.fillMaxSize().padding(16.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = { vm.goBack() }) {
@@ -222,7 +234,7 @@ fun SwipeScreen(vm: SweepViewModel) {
             Column(Modifier.weight(1f)) {
                 Text(vm.currentMonth?.label.orEmpty(), fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
                 Text(
-                    "${vm.index + 1} of ${vm.queue.size}. Pinch or double-tap to zoom",
+                    "${vm.index + 1} of ${vm.queue.size}. " + if (photo.isVideo) "Tap the video to play it" else "Pinch or double-tap to zoom",
                     fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1, overflow = TextOverflow.Ellipsis,
                 )
@@ -246,7 +258,7 @@ fun SwipeScreen(vm: SweepViewModel) {
                 )
             }
             key(photo.id) {
-                SwipeCard(photo, buttonChoice) { keep ->
+                SwipeCard(photo, buttonChoice, onPlay = { playing = true }) { keep ->
                     vm.decide(if (keep) Choice.Keep else Choice.Delete)
                 }
             }
@@ -267,10 +279,25 @@ fun SwipeScreen(vm: SweepViewModel) {
             )
         }
     }
+
+    if (playing) {
+        VideoPlayerOverlay(
+            video = photo,
+            onClose = { playing = false },
+            onKeep = { playing = false; buttonChoice = true },
+            onDelete = { playing = false; buttonChoice = false },
+        )
+    }
+    }
 }
 
 @Composable
-private fun SwipeCard(photo: Photo, buttonChoice: Boolean?, onSwiped: (keep: Boolean) -> Unit) {
+private fun SwipeCard(
+    photo: Photo,
+    buttonChoice: Boolean?,
+    onPlay: () -> Unit,
+    onSwiped: (keep: Boolean) -> Unit,
+) {
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     val offsetX = remember { Animatable(0f) }
@@ -315,9 +342,10 @@ private fun SwipeCard(photo: Photo, buttonChoice: Boolean?, onSwiped: (keep: Boo
                 }
                 .clip(RoundedCornerShape(24.dp))
                 .background(Color.Black)
-                // Double-tap: zoom in where you tapped, or zoom back out.
+                // Videos: tap to play. Photos: double-tap to zoom in where you tapped, or back out.
                 .pointerInput(photo.id) {
-                    detectTapGestures(onDoubleTap = { tap ->
+                    if (photo.isVideo) detectTapGestures(onTap = { onPlay() })
+                    else detectTapGestures(onDoubleTap = { tap ->
                         if (zoom > 1f) {
                             zoom = 1f
                             pan = Offset.Zero
@@ -342,10 +370,12 @@ private fun SwipeCard(photo: Photo, buttonChoice: Boolean?, onSwiped: (keep: Boo
                             val fingers = event.changes.count { it.pressed }
                             if (fingers >= 2) {
                                 usedTwoFingers = true
-                                val newZoom = (zoom * event.calculateZoom()).coerceIn(1f, 5f)
-                                pan = clampPan(pan + event.calculatePan(), newZoom)
-                                zoom = newZoom
-                                event.changes.forEach { it.consume() }
+                                if (!photo.isVideo) {
+                                    val newZoom = (zoom * event.calculateZoom()).coerceIn(1f, 5f)
+                                    pan = clampPan(pan + event.calculatePan(), newZoom)
+                                    zoom = newZoom
+                                    event.changes.forEach { it.consume() }
+                                }
                             } else if (fingers == 1 && !usedTwoFingers) {
                                 val delta = event.calculatePan()
                                 moved += delta
@@ -396,6 +426,27 @@ private fun SwipeCard(photo: Photo, buttonChoice: Boolean?, onSwiped: (keep: Boo
                     },
             )
 
+            if (photo.isVideo) {
+                Box(
+                    Modifier
+                        .align(Alignment.Center)
+                        .size(76.dp)
+                        .background(Color.Black.copy(alpha = 0.55f), CircleShape),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(Icons.Default.PlayArrow, contentDescription = "Play", tint = Color.White, modifier = Modifier.size(46.dp))
+                }
+                Text(
+                    formatDuration(photo.duration),
+                    color = Color.White, fontSize = 13.sp,
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .padding(top = 22.dp)
+                        .background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(50))
+                        .padding(horizontal = 10.dp, vertical = 4.dp),
+                )
+            }
+
             val progress = (offsetX.value / threshold).coerceIn(-1f, 1f)
             Stamp(
                 "KEEP", KeepColor,
@@ -418,6 +469,71 @@ private fun SwipeCard(photo: Photo, buttonChoice: Boolean?, onSwiped: (keep: Boo
                         .padding(start = 16.dp, end = 16.dp, top = 28.dp, bottom = 14.dp),
                 )
             }
+        }
+    }
+}
+
+/** Full-screen player with a seek bar, 10-second rewind/fast-forward and play/pause. */
+@OptIn(UnstableApi::class)
+@Composable
+private fun VideoPlayerOverlay(video: Photo, onClose: () -> Unit, onKeep: () -> Unit, onDelete: () -> Unit) {
+    val context = LocalContext.current
+    val exo = remember(video.id) {
+        ExoPlayer.Builder(context)
+            .setSeekBackIncrementMs(10_000)
+            .setSeekForwardIncrementMs(10_000)
+            .build()
+            .apply {
+                setMediaItem(MediaItem.fromUri(video.uri))
+                prepare()
+                playWhenReady = true
+            }
+    }
+    DisposableEffect(exo) { onDispose { exo.release() } }
+    LifecycleEventEffect(Lifecycle.Event.ON_PAUSE) { exo.pause() }
+    BackHandler { onClose() }
+
+    // pointerInput here stops touches from reaching the swipe card underneath.
+    Column(Modifier.fillMaxSize().background(Color.Black).pointerInput(Unit) { detectTapGestures { } }) {
+        Row(Modifier.fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            IconButton(onClick = onClose) {
+                Icon(Icons.Default.Close, contentDescription = "Close", tint = Color.White)
+            }
+            Text(
+                video.name, color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+            Text(
+                formatSize(video.size), color = Color.White.copy(alpha = 0.7f), fontSize = 13.sp,
+                modifier = Modifier.padding(end = 8.dp),
+            )
+        }
+        AndroidView(
+            factory = { ctx ->
+                PlayerView(ctx).apply {
+                    player = exo
+                    setShowNextButton(false)
+                    setShowPreviousButton(false)
+                    setShowRewindButton(true)
+                    setShowFastForwardButton(true)
+                }
+            },
+            modifier = Modifier.weight(1f).fillMaxWidth(),
+        )
+        Row(
+            Modifier.fillMaxWidth().padding(16.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Button(
+                onClick = onDelete,
+                colors = ButtonDefaults.buttonColors(containerColor = TossColor, contentColor = Color.White),
+                modifier = Modifier.weight(1f).height(52.dp),
+            ) { Text("Delete", fontWeight = FontWeight.SemiBold) }
+            Button(
+                onClick = onKeep,
+                colors = ButtonDefaults.buttonColors(containerColor = KeepColor, contentColor = Color.White),
+                modifier = Modifier.weight(1f).height(52.dp),
+            ) { Text("Keep", fontWeight = FontWeight.SemiBold) }
         }
     }
 }
@@ -468,7 +584,7 @@ fun ReviewScreen(vm: SweepViewModel, onDelete: (List<Uri>) -> Unit) {
         Text(formatSize(bytes), fontSize = 52.sp, fontWeight = FontWeight.ExtraBold, color = TossColor)
         Text(
             if (marked.isEmpty()) "Nothing marked for deletion."
-            else "${photoCount(marked.size)} marked for deletion. Tap a photo to keep it instead.",
+            else "${itemCount(marked.size)} marked for deletion. Tap one to keep it instead.",
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         Spacer(Modifier.height(14.dp))
@@ -492,6 +608,19 @@ fun ReviewScreen(vm: SweepViewModel, onDelete: (List<Uri>) -> Unit) {
                         contentScale = ContentScale.Crop,
                         modifier = Modifier.fillMaxSize(),
                     )
+                    if (photo.isVideo) {
+                        Row(
+                            Modifier
+                                .align(Alignment.TopStart)
+                                .padding(5.dp)
+                                .background(Color.Black.copy(alpha = 0.65f), RoundedCornerShape(50))
+                                .padding(horizontal = 6.dp, vertical = 2.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Icon(Icons.Default.PlayArrow, contentDescription = null, tint = Color.White, modifier = Modifier.size(14.dp))
+                            Text(formatDuration(photo.duration), color = Color.White, fontSize = 11.sp)
+                        }
+                    }
                     Text(
                         "Keep",
                         color = Color.White, fontSize = 12.sp,
@@ -512,7 +641,7 @@ fun ReviewScreen(vm: SweepViewModel, onDelete: (List<Uri>) -> Unit) {
             colors = ButtonDefaults.buttonColors(containerColor = TossColor, contentColor = Color.White),
             modifier = Modifier.fillMaxWidth().height(52.dp),
         ) {
-            Text("Delete ${photoCount(marked.size)}", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+            Text("Delete ${itemCount(marked.size)}", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
         }
         Spacer(Modifier.height(8.dp))
         if (vm.current != null) {

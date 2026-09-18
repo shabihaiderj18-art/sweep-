@@ -107,12 +107,12 @@ private fun PermissionScreen(onAllow: () -> Unit, onOpenSettings: () -> Unit) {
         )
         Spacer(Modifier.height(16.dp))
         Text(
-            "Sweep shows your photos one at a time, month by month. Nothing is deleted until you review your choices and confirm.",
+            "Sweep shows your photos and videos one at a time, month by month. Nothing is deleted until you review your choices and confirm.",
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             fontSize = 16.sp, lineHeight = 23.sp,
         )
         Spacer(Modifier.height(28.dp))
-        Button(onClick = onAllow) { Text("Allow photo access") }
+        Button(onClick = onAllow) { Text("Allow access") }
         TextButton(onClick = onOpenSettings) { Text("Open app settings") }
     }
 }

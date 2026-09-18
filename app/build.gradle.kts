@@ -41,4 +41,7 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.5")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.5")
     implementation("io.coil-kt:coil-compose:2.7.0")
+    implementation("io.coil-kt:coil-video:2.7.0")          // video thumbnails
+    implementation("androidx.media3:media3-exoplayer:1.4.1") // video playback
+    implementation("androidx.media3:media3-ui:1.4.1")        // player controls and seek bar
 }
