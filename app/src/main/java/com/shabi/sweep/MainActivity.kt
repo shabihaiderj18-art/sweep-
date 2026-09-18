@@ -78,6 +78,7 @@ fun SweepApp(vm: SweepViewModel = viewModel()) {
                     },
                 )
             } else when (vm.screen) {
+                Screen.Albums -> AlbumsScreen(vm)
                 Screen.Months -> MonthsScreen(vm)
                 Screen.Swipe -> SwipeScreen(vm)
                 Screen.Review -> ReviewScreen(vm) { uris ->

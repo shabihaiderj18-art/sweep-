@@ -20,17 +20,25 @@ data class Photo(
     val name: String,
     val size: Long,
     val takenAt: Long,
+    val folderId: String,
+    val folderName: String,
+    val isFavorite: Boolean,
 )
+
+/** One album on the home screen: "All photos", "Favorites", or a real folder like Camera. */
+data class Album(val id: String, val name: String, val photos: List<Photo>)
 
 data class MonthGroup(val month: YearMonth, val photos: List<Photo>) {
     val label: String
         get() = month.format(DateTimeFormatter.ofPattern("MMMM yyyy", Locale.getDefault()))
 }
 
-/** Reads every photo in the gallery and groups them by the month they were taken. */
+const val ALL_ID = "all"
+const val FAVORITES_ID = "favorites"
+
 class PhotoRepository(private val context: Context) {
 
-    fun loadMonths(): List<MonthGroup> {
+    fun loadAlbums(): List<Album> {
         val collection = MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL)
         val projection = arrayOf(
             MediaStore.Images.Media._ID,
@@ -38,6 +46,9 @@ class PhotoRepository(private val context: Context) {
             MediaStore.Images.Media.SIZE,
             MediaStore.Images.Media.DATE_TAKEN,
             MediaStore.Images.Media.DATE_ADDED,
+            MediaStore.Images.Media.BUCKET_ID,
+            MediaStore.Images.Media.BUCKET_DISPLAY_NAME,
+            MediaStore.MediaColumns.IS_FAVORITE,
         )
         val photos = mutableListOf<Photo>()
 
@@ -47,10 +58,12 @@ class PhotoRepository(private val context: Context) {
             val sizeCol = c.getColumnIndexOrThrow(MediaStore.Images.Media.SIZE)
             val takenCol = c.getColumnIndexOrThrow(MediaStore.Images.Media.DATE_TAKEN)
             val addedCol = c.getColumnIndexOrThrow(MediaStore.Images.Media.DATE_ADDED)
+            val folderIdCol = c.getColumnIndexOrThrow(MediaStore.Images.Media.BUCKET_ID)
+            val folderNameCol = c.getColumnIndexOrThrow(MediaStore.Images.Media.BUCKET_DISPLAY_NAME)
+            val favCol = c.getColumnIndexOrThrow(MediaStore.MediaColumns.IS_FAVORITE)
 
             while (c.moveToNext()) {
                 val id = c.getLong(idCol)
-                // Some photos (screenshots, downloads) have no "date taken", so fall back to "date added".
                 val taken = c.getLong(takenCol).takeIf { it > 0 } ?: (c.getLong(addedCol) * 1000)
                 photos += Photo(
                     id = id,
@@ -58,16 +71,41 @@ class PhotoRepository(private val context: Context) {
                     name = c.getString(nameCol) ?: "Photo",
                     size = c.getLong(sizeCol),
                     takenAt = taken,
+                    folderId = c.getString(folderIdCol) ?: "0",
+                    folderName = c.getString(folderNameCol) ?: "Other",
+                    isFavorite = c.getInt(favCol) == 1,
                 )
             }
         }
 
-        val zone = ZoneId.systemDefault()
-        return photos
-            .groupBy { YearMonth.from(Instant.ofEpochMilli(it.takenAt).atZone(zone)) }
-            .map { (month, list) -> MonthGroup(month, list.sortedBy { it.takenAt }) }
-            .sortedByDescending { it.month }
+        // Newest first, like the gallery.
+        photos.sortByDescending { it.takenAt }
+
+        val albums = mutableListOf<Album>()
+        if (photos.isNotEmpty()) albums += Album(ALL_ID, "All photos", photos)
+
+        val favorites = photos.filter { it.isFavorite }
+        if (favorites.isNotEmpty()) albums += Album(FAVORITES_ID, "Favorites", favorites)
+
+        // Camera and Screenshots first, then the other folders from biggest to smallest.
+        val pinned = listOf("camera", "screenshots")
+        albums += photos
+            .groupBy { it.folderId }
+            .map { (id, list) -> Album(id, list.first().folderName, list) }
+            .sortedWith(
+                compareBy<Album> { pinned.indexOf(it.name.lowercase()).let { i -> if (i == -1) Int.MAX_VALUE else i } }
+                    .thenByDescending { it.photos.size }
+            )
+        return albums
     }
+}
+
+fun groupByMonth(photos: List<Photo>): List<MonthGroup> {
+    val zone = ZoneId.systemDefault()
+    return photos
+        .groupBy { YearMonth.from(Instant.ofEpochMilli(it.takenAt).atZone(zone)) }
+        .map { (month, list) -> MonthGroup(month, list.sortedBy { it.takenAt }) }
+        .sortedByDescending { it.month }
 }
 
 object PhotoPermissions {

@@ -8,7 +8,11 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculatePan
+import androidx.compose.foundation.gestures.calculateZoom
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -47,6 +51,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -56,28 +61,31 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
+import coil.request.ImageRequest
 import kotlinx.coroutines.launch
 import kotlin.math.abs
 
-// ---------- Month list ----------
+// ---------- Albums (home) ----------
 
 @Composable
-fun MonthsScreen(vm: SweepViewModel) {
-    Column(Modifier.fillMaxSize().padding(horizontal = 20.dp)) {
+fun AlbumsScreen(vm: SweepViewModel) {
+    Column(Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
         Spacer(Modifier.height(20.dp))
         Text("Sweep", fontSize = 34.sp, fontWeight = FontWeight.ExtraBold)
-        Text("Pick a month to clean up.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text("Pick an album to clean up.", color = MaterialTheme.colorScheme.onSurfaceVariant)
         if (vm.lastFreedBytes > 0) {
             Spacer(Modifier.height(8.dp))
             Text(
@@ -90,13 +98,77 @@ fun MonthsScreen(vm: SweepViewModel) {
             vm.loading -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 CircularProgressIndicator()
             }
-            vm.months.isEmpty() -> Text("No photos found on this phone.")
-            else -> LazyColumn(
+            vm.albums.isEmpty() -> Text("No photos found on this phone.")
+            else -> LazyVerticalGrid(
+                columns = GridCells.Fixed(2),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalArrangement = Arrangement.spacedBy(16.dp),
+                contentPadding = PaddingValues(bottom = 24.dp),
+            ) {
+                items(vm.albums, key = { it.id }) { album ->
+                    AlbumTile(album, vm.remainingIn(album.photos)) { vm.openAlbum(album) }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AlbumTile(album: Album, remaining: Int, onClick: () -> Unit) {
+    Column(Modifier.clip(RoundedCornerShape(16.dp)).clickable(onClick = onClick)) {
+        AsyncImage(
+            model = album.photos.first().uri,
+            contentDescription = null,
+            contentScale = ContentScale.Crop,
+            modifier = Modifier
+                .fillMaxWidth()
+                .aspectRatio(1f)
+                .clip(RoundedCornerShape(16.dp))
+                .background(MaterialTheme.colorScheme.surface),
+        )
+        Spacer(Modifier.height(6.dp))
+        Text(
+            album.name, fontSize = 16.sp, fontWeight = FontWeight.SemiBold,
+            maxLines = 1, overflow = TextOverflow.Ellipsis,
+        )
+        Text(
+            if (remaining == 0) "All done, ${photoCount(album.photos.size)}"
+            else "$remaining of ${album.photos.size} left",
+            color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp,
+        )
+    }
+}
+
+// ---------- Months inside an album ----------
+
+@Composable
+fun MonthsScreen(vm: SweepViewModel) {
+    BackHandler { vm.goBack() }
+    Column(Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
+        Row(Modifier.padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+            IconButton(onClick = { vm.goBack() }) {
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+            }
+            Text(
+                vm.currentAlbum?.name.orEmpty(), fontSize = 24.sp, fontWeight = FontWeight.ExtraBold,
+                maxLines = 1, overflow = TextOverflow.Ellipsis,
+            )
+        }
+        Text(
+            "Pick a month to clean up.",
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(start = 12.dp),
+        )
+        Spacer(Modifier.height(16.dp))
+        if (vm.months.isEmpty()) {
+            Text("This album is empty now.", modifier = Modifier.padding(start = 12.dp))
+        } else {
+            LazyColumn(
                 verticalArrangement = Arrangement.spacedBy(10.dp),
                 contentPadding = PaddingValues(bottom = 24.dp),
             ) {
                 items(vm.months, key = { it.month.toString() }) { month ->
-                    MonthRow(month, vm.remainingIn(month)) { vm.openMonth(month) }
+                    MonthRow(month, vm.remainingIn(month.photos)) { vm.openMonth(month) }
                 }
             }
         }
@@ -150,8 +222,9 @@ fun SwipeScreen(vm: SweepViewModel) {
             Column(Modifier.weight(1f)) {
                 Text(vm.currentMonth?.label.orEmpty(), fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
                 Text(
-                    "${vm.index + 1} of ${vm.queue.size}",
+                    "${vm.index + 1} of ${vm.queue.size}. Pinch or double-tap to zoom",
                     fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis,
                 )
             }
             TextButton(onClick = { vm.openReview() }, enabled = vm.toDelete.isNotEmpty()) {
@@ -164,11 +237,12 @@ fun SwipeScreen(vm: SweepViewModel) {
                 AsyncImage(
                     model = next.uri,
                     contentDescription = null,
-                    contentScale = ContentScale.Crop,
+                    contentScale = ContentScale.Fit,
                     modifier = Modifier
                         .fillMaxSize()
                         .graphicsLayer { scaleX = 0.94f; scaleY = 0.94f; translationY = 28f; alpha = 0.55f }
-                        .clip(RoundedCornerShape(24.dp)),
+                        .clip(RoundedCornerShape(24.dp))
+                        .background(Color.Black),
                 )
             }
             key(photo.id) {
@@ -198,13 +272,28 @@ fun SwipeScreen(vm: SweepViewModel) {
 @Composable
 private fun SwipeCard(photo: Photo, buttonChoice: Boolean?, onSwiped: (keep: Boolean) -> Unit) {
     val scope = rememberCoroutineScope()
+    val context = LocalContext.current
     val offsetX = remember { Animatable(0f) }
     val offsetY = remember { Animatable(0f) }
     var gone by remember { mutableStateOf(false) }
+    var zoom by remember { mutableFloatStateOf(1f) }
+    var pan by remember { mutableStateOf(Offset.Zero) }
+
+    // Load a sharper version so zoomed photos don't look blurry (max 2048 px keeps memory safe).
+    val request = remember(photo.id) {
+        ImageRequest.Builder(context).data(photo.uri).size(2048).build()
+    }
 
     BoxWithConstraints(Modifier.fillMaxSize()) {
         val width = constraints.maxWidth.toFloat()
+        val height = constraints.maxHeight.toFloat()
         val threshold = width * 0.28f
+
+        fun clampPan(p: Offset, z: Float): Offset {
+            val maxX = width * (z - 1f) / 2f
+            val maxY = height * (z - 1f) / 2f
+            return Offset(p.x.coerceIn(-maxX, maxX), p.y.coerceIn(-maxY, maxY))
+        }
 
         val flyOut: suspend (Boolean) -> Unit = { keep ->
             if (!gone) {
@@ -225,10 +314,62 @@ private fun SwipeCard(photo: Photo, buttonChoice: Boolean?, onSwiped: (keep: Boo
                     rotationZ = offsetX.value / 30f
                 }
                 .clip(RoundedCornerShape(24.dp))
-                .background(MaterialTheme.colorScheme.surface)
-                .pointerInput(width) {
-                    detectDragGestures(
-                        onDragEnd = {
+                .background(Color.Black)
+                // Double-tap: zoom in where you tapped, or zoom back out.
+                .pointerInput(photo.id) {
+                    detectTapGestures(onDoubleTap = { tap ->
+                        if (zoom > 1f) {
+                            zoom = 1f
+                            pan = Offset.Zero
+                        } else {
+                            val z = 2.5f
+                            val center = Offset(size.width / 2f, size.height / 2f)
+                            zoom = z
+                            pan = clampPan((center - tap) * (z - 1f), z)
+                        }
+                    })
+                }
+                // Two fingers = zoom. One finger = move the zoomed photo, or swipe if not zoomed.
+                .pointerInput(photo.id) {
+                    awaitEachGesture {
+                        awaitFirstDown(requireUnconsumed = false)
+                        var usedTwoFingers = false
+                        var dragging = false
+                        var swiping = false
+                        var moved = Offset.Zero
+                        do {
+                            val event = awaitPointerEvent()
+                            val fingers = event.changes.count { it.pressed }
+                            if (fingers >= 2) {
+                                usedTwoFingers = true
+                                val newZoom = (zoom * event.calculateZoom()).coerceIn(1f, 5f)
+                                pan = clampPan(pan + event.calculatePan(), newZoom)
+                                zoom = newZoom
+                                event.changes.forEach { it.consume() }
+                            } else if (fingers == 1 && !usedTwoFingers) {
+                                val delta = event.calculatePan()
+                                moved += delta
+                                if (!dragging && moved.getDistance() > viewConfiguration.touchSlop) dragging = true
+                                if (dragging) {
+                                    if (zoom > 1f) {
+                                        pan = clampPan(pan + delta, zoom)
+                                    } else if (!gone) {
+                                        swiping = true
+                                        scope.launch {
+                                            offsetX.snapTo(offsetX.value + delta.x)
+                                            offsetY.snapTo(offsetY.value + delta.y)
+                                        }
+                                    }
+                                    event.changes.forEach { it.consume() }
+                                }
+                            }
+                        } while (event.changes.any { it.pressed })
+
+                        if (zoom < 1.05f) {
+                            zoom = 1f
+                            pan = Offset.Zero
+                        }
+                        if (swiping) {
                             scope.launch {
                                 if (abs(offsetX.value) > threshold) {
                                     flyOut(offsetX.value > 0)
@@ -237,27 +378,22 @@ private fun SwipeCard(photo: Photo, buttonChoice: Boolean?, onSwiped: (keep: Boo
                                     offsetX.animateTo(0f, spring())
                                 }
                             }
-                        },
-                        onDragCancel = {
-                            scope.launch {
-                                launch { offsetY.animateTo(0f, spring()) }
-                                offsetX.animateTo(0f, spring())
-                            }
-                        },
-                    ) { change, drag ->
-                        change.consume()
-                        if (!gone) scope.launch {
-                            offsetX.snapTo(offsetX.value + drag.x)
-                            offsetY.snapTo(offsetY.value + drag.y)
                         }
                     }
                 },
         ) {
             AsyncImage(
-                model = photo.uri,
+                model = request,
                 contentDescription = photo.name,
-                contentScale = ContentScale.Crop,
-                modifier = Modifier.fillMaxSize(),
+                contentScale = ContentScale.Fit,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .graphicsLayer {
+                        scaleX = zoom
+                        scaleY = zoom
+                        translationX = pan.x
+                        translationY = pan.y
+                    },
             )
 
             val progress = (offsetX.value / threshold).coerceIn(-1f, 1f)
@@ -270,16 +406,18 @@ private fun SwipeCard(photo: Photo, buttonChoice: Boolean?, onSwiped: (keep: Boo
                 Modifier.align(Alignment.TopEnd).padding(20.dp).rotate(12f).alpha((-progress).coerceAtLeast(0f)),
             )
 
-            Text(
-                photo.name,
-                color = Color.White, fontSize = 14.sp,
-                maxLines = 1, overflow = TextOverflow.Ellipsis,
-                modifier = Modifier
-                    .align(Alignment.BottomStart)
-                    .fillMaxWidth()
-                    .background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = 0.6f))))
-                    .padding(start = 16.dp, end = 16.dp, top = 28.dp, bottom = 14.dp),
-            )
+            if (zoom == 1f) {
+                Text(
+                    photo.name,
+                    color = Color.White, fontSize = 14.sp,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier
+                        .align(Alignment.BottomStart)
+                        .fillMaxWidth()
+                        .background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = 0.6f))))
+                        .padding(start = 16.dp, end = 16.dp, top = 28.dp, bottom = 14.dp),
+                )
+            }
         }
     }
 }

@@ -14,7 +14,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-enum class Screen { Months, Swipe, Review }
+enum class Screen { Albums, Months, Swipe, Review }
 enum class Choice { Keep, Delete }
 
 class SweepViewModel(app: Application) : AndroidViewModel(app) {
@@ -24,19 +24,19 @@ class SweepViewModel(app: Application) : AndroidViewModel(app) {
 
     var hasPermission by mutableStateOf(false); private set
     var loading by mutableStateOf(false); private set
-    var months by mutableStateOf<List<MonthGroup>>(emptyList()); private set
-    var screen by mutableStateOf(Screen.Months); private set
+    var albums by mutableStateOf<List<Album>>(emptyList()); private set
+    var screen by mutableStateOf(Screen.Albums); private set
 
+    var currentAlbum by mutableStateOf<Album?>(null); private set
+    var months by mutableStateOf<List<MonthGroup>>(emptyList()); private set
     var currentMonth by mutableStateOf<MonthGroup?>(null); private set
     var queue by mutableStateOf<List<Photo>>(emptyList()); private set
     var index by mutableIntStateOf(0); private set
     var lastFreedBytes by mutableLongStateOf(0L); private set
 
-    /** Photos marked for deletion, waiting for the user to confirm on the review screen. */
     val toDelete = mutableStateListOf<Photo>()
     private val history = mutableStateListOf<Pair<Photo, Choice>>()
 
-    /** Photos the user already chose to keep, remembered between sessions so they don't come back. */
     private var keptIds by mutableStateOf(
         prefs.getStringSet("kept", emptySet())!!.mapNotNull { it.toLongOrNull() }.toSet()
     )
@@ -52,17 +52,28 @@ class SweepViewModel(app: Application) : AndroidViewModel(app) {
 
     fun load() {
         viewModelScope.launch {
-            loading = months.isEmpty()
-            months = withContext(Dispatchers.IO) { repo.loadMonths() }
+            loading = albums.isEmpty()
+            albums = withContext(Dispatchers.IO) { repo.loadAlbums() }
+            // Keep the open album up to date after deleting.
+            currentAlbum?.let { open ->
+                val updated = albums.find { it.id == open.id }
+                currentAlbum = updated
+                months = updated?.let { groupByMonth(it.photos) } ?: emptyList()
+            }
             loading = false
         }
     }
 
-    fun remainingIn(month: MonthGroup) = month.photos.count { it.id !in keptIds }
+    fun remainingIn(photos: List<Photo>) = photos.count { it.id !in keptIds }
+
+    fun openAlbum(album: Album) {
+        currentAlbum = album
+        months = groupByMonth(album.photos)
+        screen = Screen.Months
+    }
 
     fun openMonth(month: MonthGroup) {
         currentMonth = month
-        // If the whole month was already reviewed, let the user go through it again.
         queue = month.photos.filter { it.id !in keptIds }.ifEmpty { month.photos }
         index = 0
         history.clear()
@@ -86,7 +97,6 @@ class SweepViewModel(app: Application) : AndroidViewModel(app) {
         screen = Screen.Swipe
     }
 
-    /** Take a photo off the delete list from the review screen. */
     fun restore(photo: Photo) {
         toDelete.remove(photo)
         setKept(photo.id, true)
@@ -100,10 +110,12 @@ class SweepViewModel(app: Application) : AndroidViewModel(app) {
         when (screen) {
             Screen.Swipe -> if (toDelete.isNotEmpty()) screen = Screen.Review else leave()
             Screen.Review -> if (current != null) screen = Screen.Swipe else leave()
-            Screen.Months -> Unit
+            Screen.Months -> screen = Screen.Albums
+            Screen.Albums -> Unit
         }
     }
 
+    /** Stop swiping and go back to the month list, without deleting anything. */
     fun leave() {
         toDelete.clear()
         history.clear()
@@ -114,7 +126,7 @@ class SweepViewModel(app: Application) : AndroidViewModel(app) {
         if (!confirmed) return
         lastFreedBytes = toDelete.sumOf { it.size }
         toDelete.clear()
-        history.clear() // deleted photos can't be undone from here
+        history.clear()
         screen = if (current != null) Screen.Swipe else Screen.Months
         load()
     }
