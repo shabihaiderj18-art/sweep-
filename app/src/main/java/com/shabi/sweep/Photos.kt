@@ -162,3 +162,7 @@ fun formatDuration(ms: Long): String {
 }
 
 fun itemCount(n: Int) = if (n == 1) "1 item" else "$n items"
+
+fun formatDate(ms: Long): String =
+    Instant.ofEpochMilli(ms).atZone(ZoneId.systemDefault())
+        .format(DateTimeFormatter.ofPattern("d MMM yyyy", Locale.getDefault()))

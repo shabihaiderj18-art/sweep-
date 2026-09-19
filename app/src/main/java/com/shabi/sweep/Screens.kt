@@ -10,6 +10,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.calculatePan
 import androidx.compose.foundation.gestures.calculateZoom
@@ -70,7 +72,9 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -96,10 +100,11 @@ fun AlbumsScreen(vm: SweepViewModel) {
         Spacer(Modifier.height(20.dp))
         Text("Sweep", fontSize = 34.sp, fontWeight = FontWeight.ExtraBold)
         Text("Pick an album to clean up.", color = MaterialTheme.colorScheme.onSurfaceVariant)
-        if (vm.lastFreedBytes > 0) {
+        if (vm.totalFreedBytes > 0) {
             Spacer(Modifier.height(8.dp))
             Text(
-                "Cleared ${formatSize(vm.lastFreedBytes)} in your last session.",
+                "You've cleared ${formatSize(vm.totalFreedBytes)} so far" +
+                    if (vm.lastFreedBytes > 0) " (${formatSize(vm.lastFreedBytes)} just now)." else ".",
                 color = KeepColor, fontWeight = FontWeight.SemiBold,
             )
         }
@@ -142,45 +147,119 @@ private fun AlbumTile(album: Album, remaining: Int, onClick: () -> Unit) {
             maxLines = 1, overflow = TextOverflow.Ellipsis,
         )
         Text(
-            if (remaining == 0) "All done, ${itemCount(album.photos.size)}"
-            else "$remaining of ${album.photos.size} left",
+            "${itemCount(album.photos.size)}, ${formatSize(album.photos.sumOf { it.size })}",
             color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp,
+        )
+        Text(
+            if (remaining == 0) "All done" else "$remaining left to review",
+            color = if (remaining == 0) KeepColor else MaterialTheme.colorScheme.onSurfaceVariant,
+            fontSize = 13.sp,
         )
     }
 }
 
-// ---------- Months inside an album ----------
+// ---------- Inside an album: filters, sorting, months ----------
 
 @Composable
 fun MonthsScreen(vm: SweepViewModel) {
     BackHandler { vm.goBack() }
-    Column(Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
-        Row(Modifier.padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-            IconButton(onClick = { vm.goBack() }) {
-                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
-            }
-            Text(
-                vm.currentAlbum?.name.orEmpty(), fontSize = 24.sp, fontWeight = FontWeight.ExtraBold,
-                maxLines = 1, overflow = TextOverflow.Ellipsis,
-            )
-        }
-        Text(
-            "Pick a month to clean up.",
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.padding(start = 12.dp),
-        )
-        Spacer(Modifier.height(16.dp))
-        if (vm.months.isEmpty()) {
-            Text("This album is empty now.", modifier = Modifier.padding(start = 12.dp))
-        } else {
-            LazyColumn(
-                verticalArrangement = Arrangement.spacedBy(10.dp),
-                contentPadding = PaddingValues(bottom = 24.dp),
-            ) {
-                items(vm.months, key = { it.month.toString() }) { month ->
-                    MonthRow(month, vm.remainingIn(month.photos)) { vm.openMonth(month) }
+    val items = vm.albumItems
+    val remaining = vm.remainingIn(items)
+
+    LazyColumn(
+        Modifier.fillMaxSize().padding(horizontal = 16.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+        contentPadding = PaddingValues(bottom = 24.dp),
+    ) {
+        item {
+            Row(Modifier.padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                IconButton(onClick = { vm.goBack() }) {
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                }
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        vm.currentAlbum?.name.orEmpty(), fontSize = 24.sp, fontWeight = FontWeight.ExtraBold,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(
+                        "${itemCount(items.size)}, ${formatSize(items.sumOf { it.size })}",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp,
+                    )
                 }
             }
+        }
+
+        item {
+            Text("Show", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Spacer(Modifier.height(6.dp))
+            ChipRow(TypeFilter.entries, vm.typeFilter, { it.label }) { vm.changeFilter(it) }
+        }
+
+        item {
+            Text("Sort by", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Spacer(Modifier.height(6.dp))
+            ChipRow(SortOrder.entries, vm.sort, { it.label }) { vm.changeSort(it) }
+        }
+
+        item {
+            Spacer(Modifier.height(4.dp))
+            Button(
+                onClick = { vm.openAll() },
+                enabled = items.isNotEmpty(),
+                modifier = Modifier.fillMaxWidth().height(54.dp),
+            ) {
+                Text(
+                    if (remaining > 0) "Swipe all $remaining, ${vm.sort.label.lowercase()} first"
+                    else "Review all again, ${vm.sort.label.lowercase()} first",
+                    fontSize = 16.sp, fontWeight = FontWeight.SemiBold,
+                )
+            }
+            if (remaining < items.size) {
+                TextButton(onClick = { vm.resetAlbum() }) {
+                    Text("Reset: show items I already kept")
+                }
+            }
+        }
+
+        item {
+            Text(
+                "Or pick a month",
+                fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 6.dp),
+            )
+        }
+
+        if (vm.months.isEmpty()) {
+            item { Text("Nothing here.") }
+        } else {
+            items(vm.months, key = { it.month.toString() }) { month ->
+                MonthRow(month, vm.remainingIn(month.photos)) { vm.openMonth(month) }
+            }
+        }
+    }
+}
+
+@Composable
+private fun <T> ChipRow(options: List<T>, selected: T, label: (T) -> String, onSelect: (T) -> Unit) {
+    Row(
+        Modifier.horizontalScroll(rememberScrollState()),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        options.forEach { option ->
+            val isOn = option == selected
+            Text(
+                label(option),
+                fontSize = 14.sp,
+                fontWeight = if (isOn) FontWeight.SemiBold else FontWeight.Normal,
+                color = if (isOn) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(50))
+                    .background(if (isOn) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surface)
+                    .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(50))
+                    .clickable { onSelect(option) }
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
+            )
         }
     }
 }
@@ -206,9 +285,13 @@ private fun MonthRow(month: MonthGroup, remaining: Int, onClick: () -> Unit) {
         Column(Modifier.weight(1f)) {
             Text(month.label, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
             Text(
-                if (remaining == 0) "All done, ${itemCount(month.photos.size)}"
-                else "$remaining of ${itemCount(month.photos.size)} left",
+                "${itemCount(month.photos.size)}, ${formatSize(month.photos.sumOf { it.size })}",
                 color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 14.sp,
+            )
+            Text(
+                if (remaining == 0) "All done" else "$remaining left to review",
+                color = if (remaining == 0) KeepColor else MaterialTheme.colorScheme.onSurfaceVariant,
+                fontSize = 13.sp,
             )
         }
         if (remaining == 0) Icon(Icons.Default.Check, contentDescription = "Done", tint = KeepColor)
@@ -224,6 +307,7 @@ fun SwipeScreen(vm: SweepViewModel) {
     // Set by the buttons: true = keep, false = delete. The card animates away, then reports back.
     var buttonChoice by remember(photo.id) { mutableStateOf<Boolean?>(null) }
     var playing by remember(photo.id) { mutableStateOf(false) }
+    val haptic = LocalHapticFeedback.current
 
     Box(Modifier.fillMaxSize()) {
     Column(Modifier.fillMaxSize().padding(16.dp)) {
@@ -232,7 +316,7 @@ fun SwipeScreen(vm: SweepViewModel) {
                 Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
             }
             Column(Modifier.weight(1f)) {
-                Text(vm.currentMonth?.label.orEmpty(), fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
+                Text(vm.sessionTitle, fontSize = 17.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Text(
                     "${vm.index + 1} of ${vm.queue.size}. " + if (photo.isVideo) "Tap the video to play it" else "Pinch or double-tap to zoom",
                     fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -259,6 +343,7 @@ fun SwipeScreen(vm: SweepViewModel) {
             }
             key(photo.id) {
                 SwipeCard(photo, buttonChoice, onPlay = { playing = true }) { keep ->
+                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                     vm.decide(if (keep) Choice.Keep else Choice.Delete)
                 }
             }
@@ -272,11 +357,7 @@ fun SwipeScreen(vm: SweepViewModel) {
             TextButton(onClick = { vm.undo() }, enabled = vm.canUndo) { Text("Undo") }
             RoundAction(Icons.Default.Close, "Delete", TossColor) { buttonChoice = false }
             RoundAction(Icons.Default.Check, "Keep", KeepColor) { buttonChoice = true }
-            Text(
-                formatSize(photo.size),
-                fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.width(64.dp),
-            )
+            TextButton(onClick = { vm.decide(Choice.Skip) }) { Text("Skip") }
         }
     }
 
@@ -458,16 +539,23 @@ private fun SwipeCard(
             )
 
             if (zoom == 1f) {
-                Text(
-                    photo.name,
-                    color = Color.White, fontSize = 14.sp,
-                    maxLines = 1, overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier
+                Column(
+                    Modifier
                         .align(Alignment.BottomStart)
                         .fillMaxWidth()
-                        .background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = 0.6f))))
+                        .background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = 0.65f))))
                         .padding(start = 16.dp, end = 16.dp, top = 28.dp, bottom = 14.dp),
-                )
+                ) {
+                    Text(
+                        "${formatDate(photo.takenAt)}, ${formatSize(photo.size)}",
+                        color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold,
+                    )
+                    Text(
+                        photo.name,
+                        color = Color.White.copy(alpha = 0.75f), fontSize = 12.sp,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    )
+                }
             }
         }
     }
